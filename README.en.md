@@ -52,7 +52,8 @@ Subagent sessions (`header.origin === 'subagent'`) follow their parent; moving o
 | File | Purpose |
 | --- | --- |
 | `index.js` | Host entry: registers the `/dsh-session-transfer` HTTP routes and declares the `webServer` dependency. |
-| `impl.js` | The actual migration logic, **re-imported with a cache-busting stamp on every request**, so editing it needs no DSH restart. |
+| `impl.js` | Migration orchestration and validation: preflight → read source → copy → read-back verification (including delivery-marker ownership) → attach → archive; **re-imported with a cache-busting stamp on every request**, so editing it needs no DSH restart. |
+| `host-api.js` | Host API adapter: every Harness service call, log read/write, the delivery-marker event types and the copyable format set live here, so a Harness API change touches this file only. |
 | `client.js` | Browser half: the menu row and the overlay dialog (`sidebar.workspaces.session.menu.item` / `shell.overlay`), using only `--dsw-alias-*` theme tokens and no UI primitives. |
 | `cordis.patch.yml` | Inserts the plugin into the host composition. |
 | `locale/{zh,en}.json` | Title and description shown on the plugin page. |

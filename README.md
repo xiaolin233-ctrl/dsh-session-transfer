@@ -52,7 +52,8 @@
 | 文件 | 作用 |
 | --- | --- |
 | `index.js` | Host 入口：只注册 `/dsh-session-transfer` 的 HTTP 路由，并把 Header 注入所需的 `webServer` 声明出来。 |
-| `impl.js` | 真正的迁移逻辑，**每次请求都以带戳的 `import()` 重新加载**，所以改这里不用重启 DSH。 |
+| `impl.js` | 迁移编排与校验：前置拦截 → 读源 → 复制 → 写后验证（含投递标记归属）→ 挂载 → 归档；**每次请求都以带戳的 `import()` 重新加载**，所以改这里不用重启 DSH。 |
+| `host-api.js` | Host API 适配层：所有 Harness 服务调用、日志读写、投递标记事件类型、可复制格式集合都集中在这里，Harness API 变化时只需改这一个文件。 |
 | `client.js` | 浏览器半边：菜单行 + 覆盖层对话框（`sidebar.workspaces.session.menu.item` / `shell.overlay`），只用 `--dsw-alias-*` 主题 token，不依赖 UI primitives。 |
 | `cordis.patch.yml` | 把本插件插入 Host composition。 |
 | `locale/{zh,en}.json` | 插件管理页里显示的标题与描述。 |

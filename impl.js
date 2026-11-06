@@ -2,7 +2,8 @@
  * Implementation of `dsh-session-transfer`.
  *
  * Loaded freshly on every HTTP request by `./index.js`, so Host-side edits take
- * effect on the next click without restarting DSH.
+ * effect on the next click without restarting DSH. All Harness service calls go
+ * through `./host-api.js`, which is re-imported with this module.
  *
  * The move is a faithful replay, never a byte edit of the stored log:
  *   1. read the whole source log through `sessionPersistence` (or the live
@@ -19,8 +20,24 @@
 import { randomUUID } from 'node:crypto'
 import { resolve as resolvePath } from 'node:path'
 
-const PAGE_SIZE = 500
-const MAX_EVENTS = 400_000
+const STAMP = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+const host = await import(`${new URL('./host-api.js', import.meta.url).href}?stamp=${STAMP}`)
+
+const {
+  COPYABLE_FORMAT_STATUSES,
+  DELIVERY_MARKER_TYPES,
+  appendEvents,
+  archiveSession,
+  attachSession,
+  closeSession,
+  createSession,
+  flushSession,
+  hostServices,
+  readSource,
+  readStoredLog,
+  statSession,
+  writeProjectionCache,
+} = host
 
 function messageOf(error) {
   if (error instanceof Error) return error.message === '' ? String(error) : error.message
@@ -29,12 +46,6 @@ function messageOf(error) {
 
 function failure(code, message) {
   return { ok: false, code, message }
-}
-
-function service(ctx, key, { required = true } = {}) {
-  const value = typeof ctx?.get === 'function' ? ctx.get(key) : undefined
-  if (value === undefined && required) throw new Error(`service "${key}" is not available on this Host`)
-  return value
 }
 
 function samePath(left, right) {
@@ -62,31 +73,6 @@ async function workspaceByPath(registry, cwd) {
     return await registry.resolveByPath(cwd)
   } catch {
     return undefined
-  }
-}
-
-/** A live session already holds its own log in memory. */
-function fromLiveSession(live) {
-  const events = [...live.snapshotEvents()]
-  const inherited = Number.isSafeInteger(live.inheritedEventCount) ? live.inheritedEventCount : 0
-  return { events, inheritedEventCount: inherited }
-}
-
-async function fromStoredLog(persistence, sessionId) {
-  const handle = await persistence.open(sessionId, 'read')
-  try {
-    const events = []
-    for (;;) {
-      const page = await handle.read(events.length, PAGE_SIZE)
-      const batch = Array.isArray(page?.events) ? page.events : []
-      if (batch.length === 0) break
-      events.push(...batch)
-      if (events.length > MAX_EVENTS) throw new Error(`session log exceeds ${MAX_EVENTS} events`)
-    }
-    const inherited = Number.isSafeInteger(handle.inheritedEventCount) ? handle.inheritedEventCount : 0
-    return { events, inheritedEventCount: inherited }
-  } finally {
-    await handle.close()
   }
 }
 
@@ -122,9 +108,15 @@ function buildHeader(header, id, cwd) {
   return next
 }
 
+/**
+ * Rewrite the delivery markers this session produced so they name the copy.
+ *
+ * The inherited prefix (when the copy keeps its `parentSession`) keeps the
+ * parent's markers untouched — those events still belong to the parent run.
+ */
 function retargetDeliveryMarkers(events, fromSeq, sessionId, keepsInheritedPrefix) {
   return events.map((event) => {
-    if (event.type !== 'session-log-deepseek/delivery-accepted') return event
+    if (!DELIVERY_MARKER_TYPES.has(event.type)) return event
     if (keepsInheritedPrefix && event.seq < fromSeq) return event
     const data = event.data
     if (data === null || typeof data !== 'object' || Array.isArray(data)) return event
@@ -133,52 +125,35 @@ function retargetDeliveryMarkers(events, fromSeq, sessionId, keepsInheritedPrefi
   })
 }
 
-async function readAll(persistence, sessionId) {
-  const handle = await persistence.open(sessionId, 'read')
-  try {
-    const events = []
-    for (;;) {
-      const page = await handle.read(events.length, PAGE_SIZE)
-      const batch = Array.isArray(page?.events) ? page.events : []
-      if (batch.length === 0) break
-      events.push(...batch)
-      if (events.length > MAX_EVENTS) throw new Error(`session log exceeds ${MAX_EVENTS} events`)
-    }
-    return events
-  } finally {
-    await handle.close()
+/** First delivery marker that still names a foreign session, or `undefined`. */
+function findStrayDeliveryMarker(events, sessionId, expected) {
+  for (const event of events) {
+    if (!DELIVERY_MARKER_TYPES.has(event.type)) continue
+    if (expected.keepsInheritedPrefix && event.seq < expected.inheritedEventCount) continue
+    const data = event.data
+    if (data === null || typeof data !== 'object' || Array.isArray(data)) continue
+    if (data.sessionId !== sessionId) return event.seq
   }
-}
-
-async function verifyCopy(persistence, sessionId, expectedCount, expectedLastSeq) {
-  const stored = await persistence.stat(sessionId)
-  if (stored === undefined) return { ok: false, message: 'the copied session is not visible in session storage' }
-  const events = await readAll(persistence, sessionId)
-  if (events.length !== expectedCount) return { ok: false, message: `stored ${events.length} events, expected ${expectedCount}` }
-  assertContiguous(events)
-  const lastSeq = events.length === 0 ? -1 : events[events.length - 1].seq
-  if (lastSeq !== expectedLastSeq) return { ok: false, message: `last stored seq is ${lastSeq}, expected ${expectedLastSeq}` }
-  return { ok: true }
+  return undefined
 }
 
 /**
- * Read a session's complete log. A live session is flushed first, so the stored
- * log is authoritative; only when the flush carries no writer (a session
- * published outside the agent lifecycle) does its in-memory log stand in.
+ * Re-read the copy and prove it matches what we meant to write: event count,
+ * contiguous seq, last seq, and the ownership recorded in delivery markers.
+ * The marker check is what catches a silently-missed retarget — the copy would
+ * otherwise pass the other checks and then fail to open.
  */
-async function readSource(persistence, sessions, sessionId) {
-  const live = sessions?.get?.(sessionId)
-  if (live === undefined) return fromStoredLog(persistence, sessionId)
-
-  if (typeof sessions.flush === 'function') await sessions.flush(live)
-  const stored = await fromStoredLog(persistence, sessionId)
-  if (stored.events.length === live.seq) return stored
-
-  const memory = fromLiveSession(live)
-  if (memory.events.length === live.seq) return memory
-  throw new Error(
-    `only ${stored.events.length} of ${live.seq} events reached durable storage, and the live log holds ${memory.events.length}`,
-  )
+async function verifyCopy(persistence, sessionId, expected) {
+  const stored = await statSession(persistence, sessionId)
+  if (stored === undefined) return { ok: false, message: 'the copied session is not visible in session storage' }
+  const { events } = await readStoredLog(persistence, sessionId)
+  if (events.length !== expected.count) return { ok: false, message: `stored ${events.length} events, expected ${expected.count}` }
+  assertContiguous(events)
+  const lastSeq = events.length === 0 ? -1 : events[events.length - 1].seq
+  if (lastSeq !== expected.lastSeq) return { ok: false, message: `last stored seq is ${lastSeq}, expected ${expected.lastSeq}` }
+  const stray = findStrayDeliveryMarker(events, sessionId, expected)
+  if (stray !== undefined) return { ok: false, message: `the delivery marker at seq ${stray} still names another session` }
+  return { ok: true }
 }
 
 /** GET /dsh-session-transfer/state — workspaces, ownership and session facts. */
@@ -186,19 +161,17 @@ export async function state(ctx, params = {}) {
   const sessionId = typeof params.sessionId === 'string' ? params.sessionId.trim() : ''
   if (sessionId === '') return failure('bad-request', 'sessionId is required')
 
-  let persistence
-  let registry
+  let services
   try {
-    persistence = service(ctx, 'sessionPersistence')
-    registry = service(ctx, 'workspaceRegistry')
+    services = hostServices(ctx)
   } catch (error) {
     return failure('services-missing', messageOf(error))
   }
-  const sessions = service(ctx, 'sessions', { required: false })
+  const { persistence, registry, sessions } = services
 
   let stat
   try {
-    stat = await persistence.stat(sessionId)
+    stat = await statSession(persistence, sessionId)
   } catch (error) {
     return failure('session-not-found', `session "${sessionId}" could not be read: ${messageOf(error)}`)
   }
@@ -240,7 +213,7 @@ export async function transfer(ctx, body = {}) {
 
   let registry
   try {
-    registry = service(ctx, 'workspaceRegistry')
+    registry = hostServices(ctx).registry
   } catch (error) {
     return failure('services-missing', messageOf(error))
   }
@@ -269,20 +242,17 @@ export async function transfer(ctx, body = {}) {
 async function transferOne(ctx, sessionId, target, keepOriginal, title) {
   const failures = (code, message, extra = {}) => ({ sessionId, ok: false, code, message, ...(title === undefined ? {} : { title }), ...extra })
 
-  let persistence
-  let registry
+  let services
   try {
-    persistence = service(ctx, 'sessionPersistence')
-    registry = service(ctx, 'workspaceRegistry')
+    services = hostServices(ctx)
   } catch (error) {
     return failures('services-missing', messageOf(error))
   }
-  const sessions = service(ctx, 'sessions', { required: false })
-  const projectionCache = service(ctx, 'sessionProjectionCache', { required: false })
+  const { persistence, registry, sessions, projectionCache } = services
 
   let stat
   try {
-    stat = await persistence.stat(sessionId)
+    stat = await statSession(persistence, sessionId)
   } catch (error) {
     return failures('session-not-found', `session "${sessionId}" could not be read: ${messageOf(error)}`)
   }
@@ -292,7 +262,7 @@ async function transferOne(ctx, sessionId, target, keepOriginal, title) {
   if (header.origin === 'subagent') {
     return failures('subagent-session', 'a subagent conversation belongs to its parent run and cannot be moved on its own')
   }
-  if (typeof stat.formatStatus === 'string' && stat.formatStatus !== 'current') {
+  if (typeof stat.formatStatus === 'string' && !COPYABLE_FORMAT_STATUSES.has(stat.formatStatus)) {
     return failures('format-migration-required', `this session first needs a format migration (${stat.formatStatus}) before it can be copied`)
   }
   if (typeof header.cwd === 'string' && samePath(header.cwd, target.path)) {
@@ -318,41 +288,37 @@ async function transferOne(ctx, sessionId, target, keepOriginal, title) {
 
   const newSessionId = `session-${randomUUID()}`
   const newHeader = buildHeader(header, newSessionId, target.path)
+  const keepsInheritedPrefix = newHeader.parentSession !== undefined
   // Events inherited from a parent prefix keep their parent's delivery markers; events this
   // session produced must name the copy, otherwise the stored log fails v4 relationship checks.
-  const payload = retargetDeliveryMarkers(events, source.inheritedEventCount, newSessionId, newHeader.parentSession !== undefined)
+  const payload = retargetDeliveryMarkers(events, source.inheritedEventCount, newSessionId, keepsInheritedPrefix)
 
   let created
   try {
-    created = await persistence.create(newHeader, { inheritedEventCount: source.inheritedEventCount })
+    created = await createSession(persistence, newHeader, source.inheritedEventCount)
   } catch (error) {
     return failures('create-failed', `the target session could not be created: ${messageOf(error)}`)
   }
 
   try {
-    for (let offset = 0; offset < events.length; offset += PAGE_SIZE) {
-      await created.append(payload.slice(offset, offset + PAGE_SIZE))
-    }
-    await created.flush()
+    await appendEvents(created, payload)
+    await flushSession(created)
   } catch (error) {
-    try {
-      await created.close()
-    } catch {
-      /* the handle is already unusable */
-    }
+    await closeSession(created)
     return failures('copy-failed', `the event log could not be copied: ${messageOf(error)}`, {
       partialSessionId: newSessionId,
     })
   }
-  try {
-    await created.close()
-  } catch {
-    /* closed best effort */
-  }
+  await closeSession(created)
 
   const expectedLastSeq = events.length === 0 ? -1 : events[events.length - 1].seq
   try {
-    const verified = await verifyCopy(persistence, newSessionId, events.length, expectedLastSeq)
+    const verified = await verifyCopy(persistence, newSessionId, {
+      count: events.length,
+      lastSeq: expectedLastSeq,
+      inheritedEventCount: source.inheritedEventCount,
+      keepsInheritedPrefix,
+    })
     if (!verified.ok) {
       return failures('verify-failed', `the copied log does not match the source: ${verified.message}`, {
         partialSessionId: newSessionId,
@@ -365,28 +331,20 @@ async function transferOne(ctx, sessionId, target, keepOriginal, title) {
   }
 
   try {
-    await target.attachSession(newSessionId)
+    await attachSession(target, newSessionId)
   } catch (error) {
     return failures('attach-failed', `the copy exists but could not be attached to "${target.title}": ${messageOf(error)}`, {
       partialSessionId: newSessionId,
     })
   }
 
-  let cacheWritten = false
-  try {
-    if (projectionCache !== undefined && typeof projectionCache.coldSnapshot === 'function') {
-      const written = await Promise.resolve(projectionCache.coldSnapshot(newHeader, source.inheritedEventCount, payload))
-      cacheWritten = written !== false
-    }
-  } catch {
-    /* the cache is fail-soft: opening the session rebuilds it */
-  }
+  const cacheWritten = await writeProjectionCache(projectionCache, newHeader, source.inheritedEventCount, payload)
 
   let archivedOriginal = false
   let note
   if (!keepOriginal) {
     try {
-      await registry.archiveSession(sessionId)
+      await archiveSession(registry, sessionId)
       archivedOriginal = true
     } catch (error) {
       if (error !== null && typeof error === 'object' && error.name === 'WorkspaceActiveSessionError') note = 'original-active'

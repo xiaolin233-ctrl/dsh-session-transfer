@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-transfer",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Move a conversation between workspaces while keeping its complete history and title.",
   "type": "module",
@@ -23,6 +23,7 @@
   "files": [
     "index.js",
     "impl.js",
+    "host-api.js",
     "client.js",
     "cordis.patch.yml",
     "locale",
