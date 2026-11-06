@@ -73,10 +73,6 @@ Business failures land in the individual `results[]` entries instead of failing 
 - `attach-failed`: the copy exists but could not be attached → `partialSessionId` is returned.
 - Archive failure (e.g. the source is still running) → the copy still succeeds; `note` explains that the original was kept.
 
-## Compatibility
-
-See [COMPATIBILITY.md](COMPATIBILITY.md) for the full analysis (Chinese): every Harness API the plugin depends on, a stability tiering, the known brittle points (the delivery-marker event type, client slot names, `__ModuleLoader__`), the v4 → v5 upgrade walkthrough and adaptation effort estimates.
-
 ## Verification
 
 After installing, a one-off self-test plugin ran the real code inside the live host process against two samples — a 26-event unseeded session, and a 1250-event seeded session with `inheritedEventCount = 1248`. Everything passed:
