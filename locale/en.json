@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session Transfer",
+    "description": "Move a conversation from one workspace to another. The full event log, title, tool history and token usage are replayed into a new session in the target workspace, so the conversation stays readable and can be continued."
+  }
+}

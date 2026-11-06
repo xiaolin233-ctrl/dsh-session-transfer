@@ -1,0 +1,53 @@
+{
+  "name": "dsh-session-transfer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Move a conversation between workspaces while keeping its complete history and title.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiaolin233-ctrl/dsh-session-transfer.git"
+  },
+  "homepage": "https://github.com/xiaolin233-ctrl/dsh-session-transfer#readme",
+  "bugs": {
+    "url": "https://github.com/xiaolin233-ctrl/dsh-session-transfer/issues"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "impl.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "session",
+    "workspace",
+    "transfer"
+  ]
+}
