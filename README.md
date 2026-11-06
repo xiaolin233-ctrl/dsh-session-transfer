@@ -73,6 +73,10 @@
 - `attach-failed`：副本已存在但挂载失败 → 返回 `partialSessionId`。
 - 归档失败（原会话仍在运行等）→ 副本照常成功，`note` 说明原会话被保留。
 
+## 兼容性
+
+见 [COMPATIBILITY.md](COMPATIBILITY.md)：逐项列出本插件依赖的 Harness API、稳定性分层、已知脆点（投递标记事件类型、客户端插槽名、`__ModuleLoader__` 等）、v4 → v5 的升级推演与适配工作量估算。
+
 ## 验证
 
 插件装好后用一次性自检插件在真实的 Host 进程里跑了两个用例（26 条事件的无种子会话、1250 条事件、`inheritedEventCount = 1248` 的种子会话），逐项全通过：
